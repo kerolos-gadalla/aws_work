@@ -1,0 +1,139 @@
+AWSTemplateFormatVersion: '2020-01-09'
+
+Resources:
+  RawDataBucket:
+    Type: 'AWS::S3::Bucket'
+    Properties:
+      BucketName: raw-json-data-bucket
+
+  TsunamiDataDB:
+    Type: 'AWS::DynamoDB::Table'
+    Properties:
+      TableName: tsunami-data-db
+      AttributeDefinitions:
+        - AttributeName: DeviceID
+          AttributeType: S
+        - AttributeName: Timestamp
+          AttributeType: N
+      KeySchema:
+        - AttributeName: DeviceID
+          KeyType: HASH
+        - AttributeName: Timestamp
+          KeyType: RANGE
+      ProvisionedThroughput:
+        ReadCapacityUnits: 5
+        WriteCapacityUnits: 5
+
+  TsunamiDataCollector:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      Code:
+        S3Bucket: my-lambda-functions
+        S3Key: tsunami-data-collector.zip
+      Handler: index.handler
+      Role: !GetAtt TsunamiDataCollectorRole.Arn
+      Runtime: nodejs14.x
+      MemorySize: 256
+      Timeout: 180
+      Environment:
+        Variables:
+          DATA_API_URL: https://iot-data-api.example.com
+          LIST_API_URL: https://iot-list-api.example.com
+          BUCKET_NAME: !Ref RawDataBucket
+      Events:
+        CloudWatchEvent:
+          Type: Schedule
+          Properties:
+            Schedule: rate(15 minutes)
+
+  TsunamiDataParser:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      Code:
+        S3Bucket: my-lambda-functions
+        S3Key: tsunami-data-parser.zip
+      Handler: index.handler
+      Role: !GetAtt TsunamiDataParserRole.Arn
+      Runtime: nodejs14.x
+      MemorySize: 256
+      Timeout: 180
+      Environment:
+        Variables:
+          BUCKET_NAME: !Ref RawDataBucket
+          TABLE_NAME: !Ref TsunamiDataDB
+
+  TsunamiDataCollectorRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: tsunami-data-collector-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: s3-access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                Resource: !Join ['', ['arn:aws:s3:::', !Ref RawDataBucket, '/*']]
+
+        - PolicyName: iot-data-access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - iot:GetThingShadow
+                Resource: !Join ['', ['arn:aws:iot:*:*:thing/*']]
+
+        - PolicyName: iot-list-access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - iot:ListThings
+                Resource: !Join ['', ['arn:aws:iot:*:*:thing/*']]
+
+  TsunamiDataParserRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: tsunami-data-parser-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: db-access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:GetItem
+                Resource: !Join ['', ['arn:aws:dynamodb:*:*:table/', !Ref TsunamiDataDB]]
+
+  TsunamiDataAPIGateway:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: tsunami-data-api
+
+  TsunamiDataAPIGatewayDeployment:
+    Type: 'AWS::ApiGateway::Deployment'
+    DependsOn: TsunamiDataAPIGatewayResource
+    Properties:
+      RestApiId: !Ref TsunamiDataAPIGateway
+      Description: 'Tsunami Data API deployment'
+      StageName: Prod

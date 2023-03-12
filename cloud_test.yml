@@ -1,0 +1,60 @@
+Resources:
+  MyLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Role: !GetAtt MyLambdaFunctionRole.Arn
+      Handler: lambda_function.lambda_handler
+      Runtime: python3.8
+      Code:
+        ZipFile: |
+          def lambda_handler(event, context):
+            return {
+              'statusCode': 200,
+              'body': 'Hello from Lambda!'
+            }
+
+  MyLambdaFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: lambda.amazonaws.com
+          Action: sts:AssumeRole
+      Path: "/"
+      Policies:
+      - PolicyName: MyLambdaFunctionPolicy
+        PolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+          - Effect: Allow
+            Action:
+            - logs:CreateLogGroup
+            - logs:CreateLogStream
+            - logs:PutLogEvents
+            Resource: arn:aws:logs:*:*:*
+  
+  MyApiGateway:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: MyApi
+  
+  MyApiGatewayDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn: MyApiMethod
+    Properties:
+      RestApiId: !Ref MyApiGateway
+  
+  MyApiMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref MyApiGateway
+      ResourceId: !GetAtt [ MyApiGateway, RootResourceId ]
+      HttpMethod: ANY
+      AuthorizationType: NONE
+      Integration:
+        IntegrationHttpMethod: POST
+        Type: AWS_PROXY
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${MyLambdaFunction.Arn}/invocations

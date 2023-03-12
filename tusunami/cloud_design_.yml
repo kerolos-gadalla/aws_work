@@ -1,13 +1,15 @@
-AWSTemplateFormatVersion: '2020-01-09'
+AWSTemplateFormatVersion: '2010-09-09'
+# AWSTemplateFormatVersion: "2020-01-09"
+
 
 Resources:
   RawDataBucket:
-    Type: 'AWS::S3::Bucket'
+    Type: "AWS::S3::Bucket"
     Properties:
       BucketName: raw-json-data-bucket
 
   TsunamiDataDB:
-    Type: 'AWS::DynamoDB::Table'
+    Type: "AWS::DynamoDB::Table"
     Properties:
       TableName: tsunami-data-db
       AttributeDefinitions:
@@ -25,12 +27,54 @@ Resources:
         WriteCapacityUnits: 5
 
   TsunamiDataCollector:
-    Type: 'AWS::Lambda::Function'
+    Type: "AWS::Lambda::Function"
     Properties:
       Code:
-        S3Bucket: my-lambda-functions
-        S3Key: tsunami-data-collector.zip
-      Handler: index.handler
+        ZipFile: |
+          #!/usr/bin/env python3
+          import json
+          import os
+          import boto3
+          import requests
+
+
+          def get_iot_data(device_ids, start_time, end_time):
+              data_api_url = os.environ['DATA_API_URL']
+              headers = {'Content-Type': 'application/json'}
+              data = {'deviceIds': device_ids, 'startTime': start_time, 'endTime': end_time}
+
+              response = requests.post(data_api_url, headers=headers, data=json.dumps(data))
+              response.raise_for_status()
+
+              return response.json()
+
+
+          def lambda_handler(event, context):
+              device_ids = []  # TODO: Replace this with the list of device IDs from the List API
+              start_time = int((context.aws_request_id.split('-')[0])) * 1000 - 900000
+              end_time = int(context.aws_request_id.split('-')[0]) * 1000
+
+              s3 = boto3.client('s3')
+              bucket_name = 'raw-json-data-bucket' # os.environ['BUCKET_NAME']
+
+              for i in range(0, len(device_ids), 1000):
+                  chunk_ids = device_ids[i:i + 1000]
+                  data = get_iot_data(chunk_ids, start_time, end_time)
+
+                  for item in data['results']:
+                      device_id = item['device']['deviceId']
+                      timestamp = item['device']['timestamp']
+                      raw_json = json.dumps(item)
+
+                      s3.put_object(
+                          Bucket=bucket_name,
+                          Key=f'{device_id}/{timestamp}.json',
+                          Body=raw_json
+                      )
+
+              return {'statusCode': 200, 'body': 'Data Collection Completed!'}
+          
+      Handler: index.lambda_handler
       Role: !GetAtt TsunamiDataCollectorRole.Arn
       Runtime: nodejs14.x
       MemorySize: 256
@@ -47,11 +91,41 @@ Resources:
             Schedule: rate(15 minutes)
 
   TsunamiDataParser:
-    Type: 'AWS::Lambda::Function'
+    Type: "AWS::Lambda::Function"
     Properties:
       Code:
-        S3Bucket: my-lambda-functions
-        S3Key: tsunami-data-parser.zip
+        ZipFile: |
+          #!/usr/bin/env python3
+          import json
+          import os
+          import boto3
+          from boto3.dynamodb.conditions import Key
+
+
+          def lambda_handler(event, context):
+              s3 = boto3.client('s3')
+              bucket_name = os.environ['BUCKET_NAME']
+
+              dynamodb = boto3.resource('dynamodb')
+              table_name = os.environ['TABLE_NAME']
+              table = dynamodb.Table(table_name)
+
+              for record in event['Records']:
+                  raw_s3 = record['s3']
+                  object_key = raw_s3['object']['key']
+
+                  response = s3.get_object(Bucket=bucket_name, Key=object_key)
+                  raw_json = response['Body'].read().decode('utf-8')
+                  data = json.loads(raw_json)
+
+                  device_id, timestamp = object_key.split('/')[0], object_key.split('/')[1].split('.')[0]
+                  data['device_id'] = device_id
+                  data['timestamp'] = int(timestamp)
+
+                  table.put_item(Item=data)
+
+              return {'statusCode': 200, 'body': 'Data Parsing and Storage Completed!'}
+        
       Handler: index.handler
       Role: !GetAtt TsunamiDataParserRole.Arn
       Runtime: nodejs14.x
@@ -67,7 +141,7 @@ Resources:
     Properties:
       RoleName: tsunami-data-collector-role
       AssumeRolePolicyDocument:
-        Version: '2012-10-17'
+        Version: "2012-10-17"
         Statement:
           - Effect: Allow
             Principal:
@@ -77,37 +151,38 @@ Resources:
       Policies:
         - PolicyName: s3-access
           PolicyDocument:
-            Version: '2012-10-17'
+            Version: "2012-10-17"
             Statement:
               - Effect: Allow
                 Action:
                   - s3:PutObject
-                Resource: !Join ['', ['arn:aws:s3:::', !Ref RawDataBucket, '/*']]
+                Resource:
+                  !Join ["", ["arn:aws:s3:::", !Ref RawDataBucket, "/*"]]
 
         - PolicyName: iot-data-access
           PolicyDocument:
-            Version: '2012-10-17'
+            Version: "2012-10-17"
             Statement:
               - Effect: Allow
                 Action:
                   - iot:GetThingShadow
-                Resource: !Join ['', ['arn:aws:iot:*:*:thing/*']]
+                Resource: !Join ["", ["arn:aws:iot:*:*:thing/*"]]
 
         - PolicyName: iot-list-access
           PolicyDocument:
-            Version: '2012-10-17'
+            Version: "2012-10-17"
             Statement:
               - Effect: Allow
                 Action:
                   - iot:ListThings
-                Resource: !Join ['', ['arn:aws:iot:*:*:thing/*']]
+                Resource: !Join ["", ["arn:aws:iot:*:*:thing/*"]]
 
   TsunamiDataParserRole:
     Type: AWS::IAM::Role
     Properties:
       RoleName: tsunami-data-parser-role
       AssumeRolePolicyDocument:
-        Version: '2012-10-17'
+        Version: "2012-10-17"
         Statement:
           - Effect: Allow
             Principal:
@@ -117,13 +192,17 @@ Resources:
       Policies:
         - PolicyName: db-access
           PolicyDocument:
-            Version: '2012-10-17'
+            Version: "2012-10-17"
             Statement:
               - Effect: Allow
                 Action:
                   - dynamodb:PutItem
                   - dynamodb:GetItem
-                Resource: !Join ['', ['arn:aws:dynamodb:*:*:table/', !Ref TsunamiDataDB]]
+                Resource:
+                  !Join [
+                    "",
+                    ["arn:aws:dynamodb:*:*:table/", !Ref TsunamiDataDB],
+                  ]
 
   TsunamiDataAPIGateway:
     Type: AWS::ApiGateway::RestApi
@@ -131,9 +210,9 @@ Resources:
       Name: tsunami-data-api
 
   TsunamiDataAPIGatewayDeployment:
-    Type: 'AWS::ApiGateway::Deployment'
+    Type: "AWS::ApiGateway::Deployment"
     DependsOn: TsunamiDataAPIGatewayResource
     Properties:
       RestApiId: !Ref TsunamiDataAPIGateway
-      Description: 'Tsunami Data API deployment'
+      Description: "Tsunami Data API deployment"
       StageName: Prod
